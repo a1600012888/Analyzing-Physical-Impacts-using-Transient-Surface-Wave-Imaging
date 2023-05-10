@@ -1,3 +1,8 @@
+"""
+Description: code for performing back projection given marker locations, signals, and camera calibration parameters
+Author: Tianyuan Zhang
+"""
+
 import numpy as np
 from scipy.optimize import least_squares
 from typing import List, Tuple, Dict, Callable
@@ -28,26 +33,29 @@ class BackProjSolver(object):
         marker_scaling=10,
         canvas_size=[200, 200],
         theta_cfg=dict(
-            std_coe=10.0,
+            std_coe=20.0,
             smoothing_wsize=-1,
             forward_window_size=40,
-            stability_window_size_start=-1,
-            stability_temperature=100,
             if_normalize=False,
             start_index=-1,
             offset=0,
-            window_size=20,
+            window_size=80,
             stability_window_size=50,
             pre_size=-1,
             safe_interval=10,
-            yscaling=1.0,
-            weighting_cfg=dict(name="exp"),
+            weighting_cfg={
+                "name": "poly",
+                "params": [1.0],
+            },  # Linear backprojection, no filtering
+            # weighting_cfg=dict(name="exp"), # exponential tonemapping for each frame after backprojection
             drawing_cfg=dict(
-                name="line",
-                thickness=8,
-                weighting_by_scale="log",
-                weighting_by_distance="sqrt",
-                weighting_by_undertanity=True,
+                name="weighted_cone",
+                fov=6,
+                thickness=-1,
+                weighting_by_scale=False,
+                weighting_by_distance=False,
+                weighting_by_undertanity=False,
+                cone_weighting=0.04,
             ),
             global_start=False,
         ),
@@ -58,18 +66,59 @@ class BackProjSolver(object):
     ):
         """
         Args:
+            marker_locations: int array of shape [num_of_marker, 2]
+                indicate the coordinates of markers.
+            marker_scaling: int
+                scaling factor for marker locations.
+            canvas_size: int array of shape [2, ]
+                [H, W], denote the size of the canvas.
+                larger size will result in higher computational cost
+            cornerl_locations: int array of shape [2, 2]
+                default as None.  Used for visualize the borders of the material board.
+                [x, y] coordinates for upper left and bottom right of the borders.
+                in the same unit/frame as marker_locations
+            marker_offset: int array of shape [2, ]
+                used to shift the marker locations on the canvas
+            marker_center: float array of shape [2, ]
+                used to shift the marker locations on the canvas
+            angle_mapping_obj:
+                used to represent the camera and material caliberation
+                it takes the ratio of y_tilts and x_tilts, output the angle for which to back project
             for weighting_cfg:
                 name in [exp, poly, ]
                 e.g. {name: 'poly', params: [2]} => x**2
-            corner_locations: (np.ndarray) of shape [2, 2].
-                [x, y] for upper left and bottom right.
-                in the same unit/frame as marker_locations
+
+            theta_cfg: dict
+                collection of hyperparameters for
+                    (1) detecting the arrival of the transient surface waves, as described in Eq(13) in the main paper
+                    (2) extracting the stable intervals as defined in section 5 of the paper
+                    (3) backprojections
+                I list the most important parameters below. The rest of the parameters are not recommend to change.
+
+                std_coe: float
+                    used to determine the threshold for detecting the arrival of the transient surface waves
+                smoothing_wsize: window size for gaussian smoothing
+                    perform gaussian smoothing on the signal before detecting the arrival of the transient surface waves
+                    -1 means no smoothing
+                if_normalize:
+                    normalize the signal so that the magnitude of the signal at the beginning frames are 0
+                start_index: int
+                    the index of the first frame to perform backprojection
+                    -1 means using thresholding to determine the first frame automatically
+                offset: int
+                    the offset of the first frame to perform backprojection
+                    e.g. if start_index = 10, offset = 5, then the first frame to perform backprojection is 15
+                window_size: int
+                    the size of the window to perform backprojection. (The length of stable interval period)
+                global_start: bool, default False
+                    if True the start frame for each marker is the same
         """
 
+        # initialize the canvas
         self.canvas_size = np.array(canvas_size)
-
         self.canvas = np.zeros(canvas_size)
 
+        # initialize the coordiates of all markers on the canvas
         self.marker_locations_original = marker_locations
         self.marker_scaling = marker_scaling
 
@@ -80,11 +129,11 @@ class BackProjSolver(object):
             marker_offset,
             marker_center=marker_center,
         )
-
         self.marker_offset = marker_offset
 
         self.theta_cfg = theta_cfg
 
+        # the weighting function for each frame, like filtered backprojection
         self.name2weightfunc = {
             "exp": exp_weighting_func,
             "exp_relu": exp_relu_weighting_func,
@@ -94,6 +143,7 @@ class BackProjSolver(object):
 
         # self.corner_locations = corner_locations
 
+        # account for the camera and material caliberation
         self.angle_mapping_obj = angle_mapping_obj
 
     def _init_marker_locations(
@@ -144,9 +194,25 @@ class BackProjSolver(object):
     ):
         """
         Args:
-            theta_cfg['offset']: int
-            theta_cfg['window_size']: int
+            signal_list: List[Tilt2D]
+                list of signals measured by each marker
+            start_index_list: List[int], default None
+                if specificed, it denotes the arrival time of the transient surface waves for each marker
+                if None, it will be determined automatically using thresholding
+            theta_cfg: dict, default None
+                if specificed, it will overwrite the default self.theta_cfg
+            auto_optimize: bool, default True
+            debug: bool, default False
+                if True, it will print extra information for debugging
+
+        Returns:
+            pred: np.array of shape [2]
+                the predicted location of the source of the transient surface wave
+            ret_img: np.array of shape [H, W]
+                the heatmap of the backprojection, has the same size as the canvas_size in init
         """
+
+        # override the default theta_cfg
         _cfg = copy.deepcopy(self.theta_cfg)
         if theta_cfg is not None:
             for name, value in theta_cfg.items():
@@ -178,21 +244,20 @@ class BackProjSolver(object):
         else:
             stability_list_list = None
 
-        # get start
+        # get the arrival time of the transient surface wave using thresholding
         pred_start_index_list = []
         if start_index_list is None:
             start_index_list = [None] * len(signal_list)
         for i, _signal in enumerate(signal_list):
 
             start_index = start_index_list[i]
+            # if start_index is not specified, use the thresholding method to determine it
             if start_index is None:
                 start_index = _signal.get_start_index(
                     _cfg["std_coe"],
                     _cfg["smoothing_wsize"],
                     _cfg["forward_window_size"],
                     True,
-                    _cfg["stability_window_size_start"],
-                    _cfg["stability_temperature"],
                 )
                 pred_start_index_list.append(start_index)
 
@@ -201,6 +266,7 @@ class BackProjSolver(object):
 
         start_index_list = np.array(start_index_list)
 
+        # if global_start is True, use the median of all start_index_list as the start_index for all markers
         if _cfg["global_start"]:
             start_index = np.median(start_index_list).astype(np.int32)
             start_index_list = [
@@ -264,7 +330,7 @@ class BackProjSolver(object):
 
             signal_list = tmp_new_signal_list
 
-        # begin draw canvas
+        # Begin looping over the stable ratio interval for backprojections (begin draw canvas)
         for i in range(offset, offset + window_size):
 
             ratio_list = []
@@ -279,7 +345,7 @@ class BackProjSolver(object):
                     print("Frame ind exceds length, start list: ", start_index_list)
                     if_frame_ends = True
                     break
-                y_tilt = _signal[1][frame_ind] / _cfg["yscaling"]
+                y_tilt = _signal[1][frame_ind]
                 x_tilt = _signal[0][frame_ind]
                 ratio = y_tilt / x_tilt
                 scale = np.sqrt(y_tilt**2 + x_tilt**2)
@@ -297,6 +363,8 @@ class BackProjSolver(object):
                 break
 
             ratio_list = self.angle_mapping_obj(ratio_list)
+
+            # backprojection for one frame of measurement
             tmp_img = self._draw_one_frame(
                 ratio_list,
                 self.marker_locations,
@@ -311,6 +379,7 @@ class BackProjSolver(object):
             )
             ret_img = ret_img + tmp_img
 
+        # argmax to get the location of the prediction
         pred_yx = np.array(np.unravel_index(np.argmax(ret_img), ret_img.shape))
         pred_xy = np.array([pred_yx[1], pred_yx[0]])
 
@@ -328,6 +397,29 @@ class BackProjSolver(object):
         stability_list,
         drawing_cfg,
     ):
+        """
+        Perform backprojection for one frame of measurement
+
+        Args:
+            ratio_list: the ratio between y_tilt and x_tilt for each marker.
+                the ratio is calibrated to account for cameras and material anisotropy
+                thus, the ratio is used as the prediction of direction towards the gt location,
+                as described in Eq (8), (16) in the main paper.
+            marker_locations: the location of the markers in the canvas
+            canvas_size: the size of the canvas
+            scale_list, and stability_list: the weightinf factor for each marker. By default it is all the same for each marker.
+                if you want to account for the uncertainty and nosiness of each measured signal, you can specify
+                the values of scale_list.
+            drawing_cfg: the configuration for drawing the backprojection.
+                with the following options: ["line", "cone", "weighted_cone"]
+                line: draw a line passing each marker location with the slope specified by the ratio_list
+                cone: draw a cone passing (centering at) each marker location with the slope specified by the ratio_list
+                weighted_cone: draw a cone passing (centering at) each marker location with the slope specified by the ratio_list
+                    The cone is weighted by the distance to the apex line of the cone.
+
+                weighted_cone is the recommended option.
+
+        """
         # extract params for weighting_cfg
         drawing_func_name = drawing_cfg["name"]
         drawing_param_config = {}
@@ -378,10 +470,11 @@ class BackProjSolver(object):
         weighting_by_distance="sqrt",
     ):
         """
-        y = r x + y0 - r x0
+        Draw a line passing each marker location with the slope specified by the ratio_list
+        Called by _draw_one_frame if drawing_cfg["name"] == "line"
 
-        x = 0 >  y = y0 - r x0
-        x = canvas_size: y = r * canvas_size[1] + y0 - r x0
+        Args:
+            thickness: the thickness of the line, passed to cv2.line
         """
 
         ret_img = np.zeros(canvas_size)
@@ -450,6 +543,14 @@ class BackProjSolver(object):
         weighting_by_distance=False,
         weighting_by_uncertainty=True,
     ):
+        """
+        Draw a cone passing (centering at) each marker location with the slope specified by the ratio_list
+        Called by _draw_one_frame if drawing_cfg["name"] == "cone"
+
+        Args:
+            fov: the field of view of the cone, in degree
+            thickness: not used
+        """
         ret_img = np.zeros(canvas_size)
 
         # cords_map = np.mgrid[: canvas_size[0], : canvas_size[1]].transpose(0, 2, 1)
@@ -579,6 +680,14 @@ class BackProjSolver(object):
         weighting_by_uncertainty=True,
         cone_weighting=5.0,
     ):
+        """
+        Draw a weighted cone with a given fov and ratio, the apex line is specifed by marker_locations and ratio_list
+        Called by _draw_one_frame if drawing_cfg["name"] == "weighted_cone"
+
+        Args:
+            fov: the field of view of the cone, in degree
+            thickness: not used
+        """
         ret_img = np.zeros(canvas_size)
 
         # cords_map = np.mgrid[: canvas_size[0], : canvas_size[1]].transpose(0, 2, 1)
@@ -722,7 +831,10 @@ class BackProjSolver(object):
         auto_optimize=True,
         debug=False,
     ):
+        """
+        The same as the pred function, but add one extra step to plot the result
 
+        """
         # shift gt
         if not isinstance(gt_loc, np.ndarray):
             gt_loc = np.array(gt_loc)
@@ -992,7 +1104,9 @@ class BackProjSolver(object):
         auto_optimize=True,
         debug=False,
     ):
-
+        """
+        Similar to pred_and_plot, but with polish ploting confirguration
+        """
         # shift gt
         if not isinstance(gt_loc, np.ndarray):
             gt_loc = np.array(gt_loc)

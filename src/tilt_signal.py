@@ -1,3 +1,9 @@
+"""
+Description: code for basic signal processing of tilt signal 
+    A tilt signal is a 2D signal, which is a 2D vector of time, denoting tilt in x and y directions. (shape [2, num_of_frames])
+Author: Tianyuan Zhang
+"""
+
 from typing import List, Tuple, Dict, Callable
 import numpy as np
 from copy import deepcopy
@@ -15,14 +21,16 @@ class Tilt2D(object):
     ) -> None:
         """
         Args:
-            tilts (np.ndarray) of shape [2, N]
+            tilts (np.ndarray) of shape [2, num_of_frames]
                 denotes tilts in x and y directions.
 
             mean: float.  represent pre-computed mean value
             std: float. represent pre-computed std value.
                 If no pre-computed! It will be computed using the first clip of the signal
 
-            cropped: bool. If cropped, then start of the signal is fixed as 0
+            cropped: bool. default False
+                If True, first frame of the signal denote the the arrival time of the signal is the.
+
         """
 
         # [N,1]
@@ -50,7 +58,7 @@ class Tilt2D(object):
         self,
     ):
         """
-        pad the beggning of the signal
+        pad the beggning of the signal with 30 frames of the first clip
         """
         new_x = np.concatenate(
             [
@@ -95,8 +103,12 @@ class Tilt2D(object):
 
     def get_smoothed_signal(self, window_size=5) -> np.ndarray:
         """
+        Using guassian kernel to smooth the signal
+        Args:
+            window_size: int. the size of the guassian kernel equals to window_size * 2 + 1
         Outputs:
-            smoothed_titls (np.ndarray) of shape [N. 2]
+            smoothed_titls Tilt2D.
+                A new Tilt2D object denotes the gaussian smoothed signal
         """
 
         kernel1 = np.arange(1, window_size // 2 + 1)
@@ -118,6 +130,16 @@ class Tilt2D(object):
         return ret_signal
 
     def get_gradient(self, smoothing_wsize=-1):
+        """
+        Get the gradient of the signal, which is the difference between two consecutive frames
+        Args:
+            smoothing_wsize: int.
+                perform gaussian smoothing with window size of smoothing_wsize * 2 + 1 before computing the gradient
+                if -1, no smoothing
+        Outputs:
+            signal_: Tilt2D.
+                A new Tilt2D object denotes the gradient of the signal
+        """
         if smoothing_wsize > 0:
             signal_ = self.get_smoothed_signal(smoothing_wsize)
         else:
@@ -188,9 +210,11 @@ class Tilt2D(object):
 
     def get_roi_start(self, y, std_coe=4.0, mean=None, std=None):
         """
+        Using threshold to get the arrival time of the transient surface waves
+            Described in Eq (13) of the main paper
         Args:
             y (np.ndarray) of shape [N, ]
-            std_coe:
+            std_coe: float, the threshold is std_coe * std of the signal
         Outs:
             start_index
         """
@@ -222,18 +246,21 @@ class Tilt2D(object):
         smoothing_wsize=-1,
         forward_window_size=40,
         mag_only=True,
-        stability_window_size=-1,
-        stability_temperature=100,
     ):
         """
+        A warpper function to get the arrival time of the transient surface waves
+        This function groups multiple steps:
+            1. smoothing  (optional), calling self.get_smoothed_signal
+            2. high pass filtering  (optional) self.forward_conv
+            3. thresholding to get the arrival time self.get_roi_start
         Args:
             std_coe: for threshold
             smoothing_wsize: size of the smoothing window size.
                 if smoothing_wsize < 0, means no smoothing
-            stability_window_size: int. if -1: don't use stability to detect start.
-            When stability_window_size > 1, usse stability to detect start.
-            When stability > 1 and mag_only = True, still use stability.
-
+            forward_window_size: int
+                The window size high pass filter has is 2 * forward_window_size
+            mag_only: bool
+                If True, only use the magnitude of the signal for thresholding
         """
 
         if self.cropped:
@@ -247,7 +274,7 @@ class Tilt2D(object):
             raw_signal = signal
 
         if mag_only:
-            mag_signal = np.sqrt(signal.tilt_x ** 2 + signal.tilt_y ** 2)
+            mag_signal = np.sqrt(signal.tilt_x**2 + signal.tilt_y**2)
             signal = Tilt2D([mag_signal, deepcopy(mag_signal)])
 
         if forward_window_size > 0:
@@ -293,35 +320,7 @@ class Tilt2D(object):
 
         if forward_window_size > 0:
             start_index = start_index + forward_window_size
-        if stability_window_size > 0:
-            # crop original signal
-            crop_start_index = start_index - 100
-            crop_window_size = 300
-            raw_signal = Tilt2D(
-                [
-                    raw_signal[0][
-                        crop_start_index : crop_start_index + crop_window_size
-                    ],
-                    raw_signal[1][
-                        crop_start_index : crop_start_index + crop_window_size
-                    ],
-                ]
-            )
-            rec_mse = raw_signal.get_stability(stability_window_size)
-            stability_list = np.exp(rec_mse * -1.0 * stability_temperature)
-            signal = Tilt2D([stability_list, deepcopy(stability_list)])
-            if forward_window_size > 0:
-                signal = signal.edge_conv(forward_window_size, if_abs=True)
 
-            start_index = np.argmax(signal[0])
-
-            if forward_window_size > 0:
-                start_index = start_index + forward_window_size
-
-            # don't add this.
-            start_index = start_index  # + stability_window_size // 2
-
-            start_index = start_index + crop_start_index
         return start_index
 
     def get_roi(
@@ -335,6 +334,10 @@ class Tilt2D(object):
         window_size: int = 100,
     ):
         """
+        Get the stable ratio interval of the signal, which is used for backprojections.
+        This function groups multiple steps together:
+            1. determing the arrival time of the transient surface waves by calling self.get_start_index
+            2. crop the signal start from the arrival time and parameter:offset,  with a window size specifed by parameter:window_size
         Args:
             std_coe: for threshold
             smoothing_wsize: size of the smoothing window size.
@@ -388,8 +391,6 @@ class Tilt2D(object):
         std_coe: float = 10.0,
         smoothing_wsize: int = -1,
         forward_window_size: int = 40,
-        stability_window_size: int = -1,
-        stability_temperature: float = 100,
         if_normalize: bool = False,
         start_index: int = -1,
         offset: int = 0,
@@ -400,6 +401,8 @@ class Tilt2D(object):
         **kwargs,
     ):
         """
+        A warpper function for self.get_roi,
+        which will add one extra step to renormalize the signal
         Args:
             std_coe: for threshold
             smoothing_wsize: size of the smoothing window size.
@@ -427,8 +430,6 @@ class Tilt2D(object):
                 std_coe=std_coe,
                 smoothing_wsize=smoothing_wsize,
                 forward_window_size=forward_window_size,
-                stability_window_size=stability_window_size,
-                stability_temperature=stability_temperature,
             )
         if if_normalize:
             # normalize
@@ -473,8 +474,6 @@ class Tilt2D(object):
         std_coe: float = 10.0,
         smoothing_wsize: int = -1,
         forward_window_size: int = 40,
-        stability_window_size: int = -1,
-        stability_temperature: float = 100,
         if_normalize: bool = False,
         start_index: int = -1,
         offset: int = 0,
@@ -487,8 +486,11 @@ class Tilt2D(object):
         safe_interval: int = 20,
         search_range=None,
     ):
-
         """
+        This function performs the following steps:
+        1. get the stable ratio interval of the tilt_x and tilt_y
+        2. using the stable ratio interval to compute a robust estimate of the ratio between y_tilt/x_tilt,
+            basically a robust estimate of \theta_y / \theta_x in Eq (7) of the paper
         Args:
             std_coe: for threshold
             smoothing_wsize: size of the smoothing window size.
@@ -510,8 +512,6 @@ class Tilt2D(object):
                 std_coe,
                 smoothing_wsize,
                 forward_window_size,
-                stability_window_size,
-                stability_temperature,
                 if_normalize,
                 start_index,
                 offset,
@@ -527,8 +527,6 @@ class Tilt2D(object):
             std_coe,
             smoothing_wsize,
             forward_window_size,
-            stability_window_size,
-            stability_temperature,
             if_normalize,
             start_index,
             offset,
@@ -591,8 +589,6 @@ class Tilt2D(object):
         std_coe: float = 10.0,
         smoothing_wsize: int = -1,
         forward_window_size: int = 40,
-        stability_window_size: int = -1,
-        stability_temperature: float = 100,
         if_normalize: bool = False,
         start_index: int = -1,
         offset: int = 0,
@@ -604,6 +600,9 @@ class Tilt2D(object):
         search_range=[-10, 50, 2],
     ):
         """
+        This function is an advanced version of self.get_theta.
+        It searches the best hyper-parameters, like window_size,
+        for the best robust estimate of the angle.
         Args:
             window_size: default as int.  if window_size as a list, e.g. [10, 20]
                 then performing searching!
@@ -635,8 +634,6 @@ class Tilt2D(object):
                 std_coe=std_coe,
                 smoothing_wsize=smoothing_wsize,
                 forward_window_size=forward_window_size,
-                stability_window_size=stability_window_size,
-                stability_temperature=stability_temperature,
             )
         if if_normalize:
             # normalize
@@ -743,6 +740,8 @@ class Tilt2D(object):
         # **kwargs,
     ):
         """
+        Substract the mean of the signal and return the shifted signal
+
         Args:
             std_coe: for threshold
             smoothing_wsize: size of the smoothing window size.
@@ -806,6 +805,14 @@ class Tilt2D(object):
         return signal
 
     def get_stability(self, window_size=50):
+        """
+        Compute the stability of the ratio tilts_y / tilts_x for each frame.
+        The stability metric is computed within a window of size window_size.
+        This stability metric can be used to search for the stable time interval.
+
+        However, by default, we don't perform searching. But we still visualize the stability metric
+        for better understanding the data.
+        """
 
         half_window_size = window_size // 2
 
@@ -817,7 +824,7 @@ class Tilt2D(object):
 
         y_div_x = self.tilt_y / self.tilt_x
 
-        norm_signal = np.sqrt(self.tilt_x ** 2 + self.tilt_y ** 2 + 1e-3)
+        norm_signal = np.sqrt(self.tilt_x**2 + self.tilt_y**2 + 1e-3)
 
         normalized_x = self.tilt_x / norm_signal
         normalized_y = self.tilt_y / norm_signal
@@ -836,7 +843,7 @@ class Tilt2D(object):
             reconstruct_mse = np.mean(
                 (
                     (cropped_norm_x * median_ratio - cropped_norm_y)
-                    / np.sqrt(1 + median_ratio ** 2)
+                    / np.sqrt(1 + median_ratio**2)
                 )
                 ** 2
             )
@@ -870,6 +877,10 @@ def rotation_angle_mapping(params, ratio):
 
 
 class AngleMapping(object):
+    """
+    A class for acounting the camera caliberation and material anisotropy
+    """
+
     def __init__(self, cfg=dict(name="linear", params=[1.0]), num_marker=10) -> None:
         """
         Args:
