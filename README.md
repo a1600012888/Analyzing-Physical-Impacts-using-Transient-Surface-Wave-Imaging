@@ -4,11 +4,11 @@ This repo contains the official code and data for our CVPR 2023 paper: [Analyzin
 
 ## How to run 
 
-Users can start install basica packages for data processing: 
+Users can start by installing basic packages for data processing: 
 
 `pip3 install -r requirements.txt`
 
-All python code are put in `src`, and users can follow `LocalizationMain.ipynb` to perform impact localization, and `PingpngDemo.ipynb` to recreate Figure-9 in the main paper. 
+All Python code is under`src`, and users can follow `LocalizationMain.ipynb` to perform impact localization and `PingpngDemo.ipynb` to recreate Figure-9 in the main paper. 
 
 For the data, please jump to `data/README.md`[add link later] for more info. 
 

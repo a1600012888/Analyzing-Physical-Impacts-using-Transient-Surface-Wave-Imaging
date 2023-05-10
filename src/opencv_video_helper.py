@@ -1,3 +1,8 @@
+"""
+Description: helper function for loading, playing, and exporting videos
+Author: Tianyuan Zhang, Mark Sheinin
+"""
+
 import numpy as np
 import cv2
 
