@@ -299,3 +299,18 @@ def plot_list(y_list, label_list=None, x_axis=None):
         plt.legend()
 
     plt.show()
+
+def plot_list_func(y_list, label_list=None):
+    
+    x_list = list(range(len(y_list[0])))
+    
+    plt.figure()
+    for i, y in enumerate(y_list):
+        if label_list is not None:
+            plt.plot(x_list, y, label=label_list[i])
+        else:
+            plt.plot(x_list, y)
+            
+    if label_list is not None:
+        plt.legend()
+    plt.show()

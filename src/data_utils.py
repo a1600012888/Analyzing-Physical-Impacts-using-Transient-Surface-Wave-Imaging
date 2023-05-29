@@ -8,9 +8,9 @@ import hdf5pickle
 import os
 
 try:
-    from .tilt_signal import Tilt2D
+    from .tilt_signal import Tilt2D, AngleMapping
 except:
-    from tilt_signal import Tilt2D
+    from tilt_signal import Tilt2D, AngleMapping
 
 
 ###### --------------------------------------------------------- ######
@@ -46,7 +46,6 @@ def generate_saving_format(
     suggested_theta_cfg=None,
     searched_start_index=None,
 ):
-
     save_dict = {}
 
     roi_cfg = {
@@ -118,9 +117,12 @@ def generate_saving_format(
 
 
 def load_from_processed(
-    npz_path, len_first_clip=80, use_optical_scaling=True, shift_signal=True
+    npz_path,
+    len_first_clip=80,
+    use_optical_scaling=True,
+    shift_signal=True,
+    use_angle_mapping=True,
 ):
-
     DataDict = np.load(npz_path, allow_pickle=True)
 
     # change to dict first
@@ -209,6 +211,12 @@ def load_from_processed(
                     )
                 )
 
+    if DataDict["angle_mapping_cfg"] is not None and use_angle_mapping:
+        angle_map_cfg = DataDict["angle_mapping_cfg"]
+        angle_mapping_obj = AngleMapping(DataDict["angle_mapping_cfg"])
+    else:
+        angle_mapping_obj = AngleMapping()
+
     print("=> Loading")
     print("Signal X of shape : {}".format(signal_x.shape))
 
@@ -221,11 +229,11 @@ def load_from_processed(
         gt_loc_list,
         name_list,
         DataDict,
+        angle_mapping_obj,
     )
 
 
 def load_npz_array_dict(npz_path: str):
-
     # not a dict now. conver to dict
     DataDict = np.load(npz_path, allow_pickle=True)
     NewDict = {}
